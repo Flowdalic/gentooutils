@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+
+EMERGE_OPTS="--nospinner"
+ONLY_WORLD=false
+DEBUG=false
+PRETEND=false
+
+while getopts "dpw" OPTION; do
+    case $OPTION in
+	d)
+	    DEBUG=true
+	    ;;
+	p)
+	    PRETEND=true
+	    ;;
+	w)
+	    ONLY_WORLD=true
+	    ;;
+    esac
+done
+
+$DEBUG && set -x
+
+WARNING=""
+
+echo "Step 1: Run glsa-check and fix packages which are affected by an GLSA"
+glsa-check -tv affected
+sudo glsa-check -f affected
+if [[ $? -ne 0 ]]; then
+	WARNING+="glsa-check failed!!!"
+fi
+
+echo "Step 2: Update world packages without fetch restrictions"
+PACKAGES=$(eix -I -u --world-file --only-names --not -\( --restrict-fetch -\) )
+if [[ -z $PACKAGES ]] ; then
+    echo "Step 2: Skipping, no world packages"
+else
+    echo "Step 2: World packages with updates"
+	echo $PACKAGES
+	echo "Step 2: Calculating dependency tree"
+    emerge $EMERGE_OPTS -tpv ${PACKAGES} || exit 1
+    $PRETEND || sudo emerge -j2 $EMERGE_OPTS -u $PACKAGES --keep-going || exit 1
+fi
+
+$ONLY_WORLD && exit
+
+# If -w was not given, proceed with packages that become obsolete. For
+# example because the ebuild for the installed version got deleted
+echo "Step 3: Update packages that have become obsolete"
+PACKAGES=$(TEST_FOR_REDUNDANCY=false eix -T --only-names)
+if [[ -z $PACKAGES ]] ; then
+    echo "Step 3: Skipping, no obsolete packages"
+else
+    echo "Step 3: Non-World packages that became obsolete"
+    sudo emerge $EMERGE_OPTS -tpv $PACKAGES || exit 1
+    if ! $PRETEND ; then
+	for p in $PACKAGES ; do
+	    echo "Now trying to update $p"
+	    eix -I -e $p
+	    sudo emerge $EMERGE_OPTS -1u $p
+	done
+    fi
+fi
+
+echo "Step 4: Run emerge preserved-rebuild"
+sudo emerge $EMERGE_OPTS @preserved-rebuild
+
+echo "Step 5: Run revdep-rebuild"
+sudo revdep-rebuild -- --keep-going || exit 1
+
+echo "Step 6: Check for fetch-restricted world packages with updates"
+RESTRICT_FETCH_PACKAGES=$(eix -I -u --world-file --only-names --restrict-fetch )
+if [[ ! -z $RESTRICT_FETCH_PACKAGES ]]; then
+    echo "The following world packages have fetch restrictions"
+    echo "Please resovle those"
+    emerge $EMERGE_OPTS -pv ${RESTRICT_FETCH_PACKAGES}
+else
+	echo "No packages found"
+fi
+
+echo $WARNING
